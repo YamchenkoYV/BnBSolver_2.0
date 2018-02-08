@@ -128,7 +128,7 @@ struct State {
     }
 
     Box getSub() {
-        std::lock_guard<std::mutex> lock(mutex);
+        //std::lock_guard<std::mutex> lock(mutex);
         const Box box = mPool.back();
         mPool.pop_back();
 
@@ -231,11 +231,10 @@ void getCenter(const Box& ibox, std::vector<double>& c) {
 }
 
 void solveSerial(State* s, const BM& bm, double eps) {
-    s->setProcessing();
-
     const int dim = bm.getDim();
     std::vector<double> c(dim);
     while (!s->mPool.empty()) {
+        std::lock_guard<std::mutex> lock(s->mutex);
         s->mSteps ++;
         Box b = s->getSub(); //Lock state's mutex
         getCenter(b, c);
@@ -246,7 +245,6 @@ void solveSerial(State* s, const BM& bm, double eps) {
         }
         auto lb = bm.calcInterval(b).lb();
         if (lb <= s->mRecordVal - eps) {
-            std::lock_guard<std::mutex> lock(s->mutex);
             split(b, s->mPool);
         }
         if (s->mSteps >= s->mMaxSteps)
@@ -260,6 +258,7 @@ bool isProblemSolved(){ return gThreadList.ActiveCount() == 0; }
 
 void runThread(State* s, const BM& bm, double eps) {
     gThreadList.mActiveThreadCount = 1;
+    s->setProcessing();
     std::thread init_thread(solveSerial, s, std::ref(bm), eps);
     init_thread.detach();
 }
@@ -271,22 +270,21 @@ void solve(State& init_s, const BM& bm, double eps, double b_coeff) {
         b_coeff = 0.5;
     }
 
-    State* s = new State(init_s);
-    s->setProcessing();
-    init_s.assignTaskTo(s);
-    gThreadList.PushFront(s);
+    State* first_s = new State();
+    init_s.assignTaskTo(first_s);
+    gThreadList.PushFront(first_s);
 
-    runThread(s, bm, eps);
+    runThread(first_s, bm, eps);
     
     while(! isProblemSolved()){
         for( auto iter = gThreadList().begin() ; iter != gThreadList().end(); ++iter)
         {
             State* cur_state = *iter;
             if (cur_state->isReady()) {
-                if (! init_s.mPool.empty() && init_s.hasResources()) {
+                /*if (! init_s.mPool.empty() && init_s.hasResources()) {
                     init_s.assignTaskTo(cur_state);
                     runThread(cur_state, bm, eps);
-                }
+                }*/
                 continue;
             }
             
@@ -305,16 +303,15 @@ void solve(State& init_s, const BM& bm, double eps, double b_coeff) {
                             continue;
 
                         gThreadList.PushFront(new_state);
-                    } /*else {
+                    } else {
                         new_state = gThreadList.getReadyState();
                         if( new_state == nullptr )
                             continue;
 
                         new_state = cur_state->try_split(b_coeff, new_state);
-                    }*/
-
-                    if( new_state == nullptr )
-                        continue;
+                        if( new_state == nullptr )
+                            continue;
+                    }
 
                     runThread(new_state, bm, eps);
             }
