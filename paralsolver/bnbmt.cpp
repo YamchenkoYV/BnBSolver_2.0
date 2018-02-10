@@ -20,6 +20,7 @@
 #include <chrono>
 #include <forward_list>
 #include <mutex>
+#include <memory>
 
 #include <testfuncs/benchmarks.hpp>
 
@@ -27,10 +28,17 @@ using BM = Benchmark<double>;
 using Box = std::vector<Interval<double>>;
 struct State;
 
-const static int gProcs = 2;
+static int gProcs = 3;
 
-const static int gMtStepsLimit = 1000;
-const static int gMtSubsLimit = 10;
+static double gEps = 0.1;
+
+static double gSubsSplitCoeff = 0.5;
+
+static double gStepsSplitCoeff = 0.5;
+
+static int gMtSubsLimit = 10;
+
+static int gMtStepsLimit = 1000;
 
 const static int gMaxStepsTotal = 10000000;
 
@@ -45,16 +53,16 @@ struct ThreadList {
    void PushFront(State* st) {
        ++mThreadListSize;
        mList.push_front(st);
-       std::cout << "ThreadList size "<< mThreadListSize << std::endl;
+       //std::cout << "ThreadList size "<< mThreadListSize << std::endl;
    }
 
    void clear();
 
-    std::forward_list< State* > mList;
+   std::forward_list< State* > mList;
 
-    size_t mThreadListSize = 0;
+   size_t mThreadListSize = 0;
 
-    size_t mActiveThreadCount = 0;
+   size_t mActiveThreadCount = 0;
 };
 
 ThreadList gThreadList;
@@ -92,19 +100,27 @@ struct State {
         mPool.insert(mPool.end(), s.mPool.begin(), s.mPool.end());
     }
 
-    bool hasResources() { return !mPool.empty() && mMaxSteps != 0; }
+    bool hasResources() { return ! mPool.empty() && mMaxSteps != 0; }
+    void PrintResourses() {
+        std::cout << "Remaining task count: " << mPool.size() << "\n"
+                     "Remainng steps count: " << mMaxSteps << "\n";
+        //             "Diff: " << gMaxStepsTotal - mSteps <<std::endl;
+    }
 
     void assignTaskTo(State* st) {
         *st = *this;
-        clear();
+        st->mSteps = 0;
+        mMaxSteps = 0;
+        mPool.clear();
     }
 
-    State* try_split(double q, State* s = nullptr) {
+    State* try_split(State* s = nullptr) {
         std::lock_guard<std::mutex> lock(mutex);
 
-        const int remMaxSteps = mMaxSteps - mSteps;
+        const int rem_steps = mMaxSteps - mSteps;
+        const int pool_size = mPool.size();
 
-        if (mPool.size() <= gMtSubsLimit || remMaxSteps <= gMtStepsLimit) {
+        if (pool_size <= gMtSubsLimit || rem_steps <= gMtStepsLimit) {
             return nullptr;
         }
 
@@ -112,23 +128,26 @@ struct State {
             s = new State();
         }
 
-        mMaxSteps = mSteps + remMaxSteps / 2;
-        s->mMaxSteps = remMaxSteps - mMaxSteps;
+        const int mv_step_count = rem_steps * gStepsSplitCoeff;
+
+        mMaxSteps = mSteps + (rem_steps - mv_step_count);
+        s->mMaxSteps = mv_step_count;
 
         s->mRecord = mRecord;
         s->mRecordVal = mRecordVal;
 
-        const int mvSubCount = gMtSubsLimit * q;
-        auto mvSubBegIter = mPool.end() - mvSubCount;
+        const int mv_sub_count = pool_size * gSubsSplitCoeff;
 
-        s->mPool.assign(mPool.begin(), mvSubBegIter);
-        mPool.erase(mPool.begin(), mvSubBegIter);
+        auto mv_beg_iter = mPool.begin() + mv_sub_count;
+
+        s->mPool.assign(mPool.begin(), mv_beg_iter);
+        mPool.erase(mPool.begin(), mv_beg_iter);
 
         return s;
     }
 
     Box getSub() {
-        //std::lock_guard<std::mutex> lock(mutex);
+        std::lock_guard<std::mutex> lock(mutex);
         const Box box = mPool.back();
         mPool.pop_back();
 
@@ -155,6 +174,7 @@ struct State {
     bool isProcessing() const { return (this->mStatus == IS_PROCESSING) ? true : false; }
     bool isReady() const { return (this->mStatus == IS_READY) ? true : false; }
 
+    //~State() { std::cout << "State destructor" << std::endl; }
 
     double mRecordVal;
 
@@ -182,10 +202,14 @@ State* ThreadList::getReadyState() {
 }
 
 void ThreadList::clear() {
-    for(auto it = mList.begin(); it != mList.end(); ++it) {
-        State* cur_state = *it;
-        delete(cur_state);
+    for(auto it = mList.begin(); it != mList.end();) {
+        delete(*it);
+        ++it;
+        mList.pop_front();
     }
+
+    mThreadListSize = 0;
+    mActiveThreadCount = 0;
 }
 
 std::ostream& operator<<(std::ostream & out, const State s) {
@@ -206,7 +230,7 @@ double len(const Interval<double>& I) {
     return I.rb() - I.lb();
 }
 
-void split(const Box& ibox, std::vector<Box>& v) {
+void split(const Box& ibox, State* s) {
     auto result = std::max_element(ibox.begin(), ibox.end(),
             [](const Interval<double>& f, const Interval<double>& s) {
                 return len(f) < len(s);
@@ -219,8 +243,10 @@ void split(const Box& ibox, std::vector<Box>& v) {
     Box b2(ibox);
     Interval<double> iupper(ibox[i].lb() + 0.5 * maxlen, ibox[i].rb());
     b2[i] = iupper;
-    v.push_back(std::move(b1));
-    v.push_back(std::move(b2));
+
+    std::lock_guard<std::mutex> lock(s->mutex);
+    s->mPool.push_back(std::move(b1));
+    s->mPool.push_back(std::move(b2));
 }
 
 void getCenter(const Box& ibox, std::vector<double>& c) {
@@ -230,13 +256,12 @@ void getCenter(const Box& ibox, std::vector<double>& c) {
     }
 }
 
-void solveSerial(State* s, const BM& bm, double eps) {
+void solveSerial(State* s, const BM& bm) {
     const int dim = bm.getDim();
     std::vector<double> c(dim);
     while (!s->mPool.empty()) {
-        std::lock_guard<std::mutex> lock(s->mutex);
+        Box b = s->getSub();    //Lock state's mutex
         s->mSteps ++;
-        Box b = s->getSub(); //Lock state's mutex
         getCenter(b, c);
         double v = bm.calcFunc(c);
         if (v < s->mRecordVal) {
@@ -244,8 +269,8 @@ void solveSerial(State* s, const BM& bm, double eps) {
             s->mRecord = c;
         }
         auto lb = bm.calcInterval(b).lb();
-        if (lb <= s->mRecordVal - eps) {
-            split(b, s->mPool);
+        if (lb <= s->mRecordVal - gEps) {
+            split(b, s);    //Lock state's mutex
         }
         if (s->mSteps >= s->mMaxSteps)
             break;
@@ -254,37 +279,39 @@ void solveSerial(State* s, const BM& bm, double eps) {
     s->setFinished();
 }
 
-bool isProblemSolved(){ return gThreadList.ActiveCount() == 0; }
-
-void runThread(State* s, const BM& bm, double eps) {
-    gThreadList.mActiveThreadCount = 1;
+void runThread(State* s, const BM& bm) {
+    ++gThreadList.mActiveThreadCount;
     s->setProcessing();
-    std::thread init_thread(solveSerial, s, std::ref(bm), eps);
+    std::thread init_thread(solveSerial, s, std::ref(bm));
     init_thread.detach();
 }
 
-void solve(State& init_s, const BM& bm, double eps, double b_coeff) {
-    if (b_coeff >= 1) {
+void try_assign_run(State* sender, State* receiver, const BM& bm) {
+    if (! sender->mPool.empty() && sender->hasResources()) {
+        sender->assignTaskTo(receiver);
+        runThread(receiver, bm);
+    }
+}
+
+void solve(State& init_s, const BM& bm) {
+    if (gSubsSplitCoeff >= 1) {
         std::cerr << "Warn: balance coefficient should be less than 1."
-        << " b_coeff set to 0.5" << std::endl;
-        b_coeff = 0.5;
+        << " gSubsSplitCoeff set to 0.5" << std::endl;
+        gSubsSplitCoeff = 0.5;
     }
 
     State* first_s = new State();
     init_s.assignTaskTo(first_s);
     gThreadList.PushFront(first_s);
 
-    runThread(first_s, bm, eps);
+    runThread(first_s, bm);
     
-    while(! isProblemSolved()){
+    while(gThreadList.ActiveCount() || init_s.hasResources()) {
         for( auto iter = gThreadList().begin() ; iter != gThreadList().end(); ++iter)
         {
             State* cur_state = *iter;
             if (cur_state->isReady()) {
-                /*if (! init_s.mPool.empty() && init_s.hasResources()) {
-                    init_s.assignTaskTo(cur_state);
-                    runThread(cur_state, bm, eps);
-                }*/
+                try_assign_run(&init_s, cur_state, bm);
                 continue;
             }
             
@@ -293,12 +320,16 @@ void solve(State& init_s, const BM& bm, double eps, double b_coeff) {
                 init_s.merge(*cur_state);
                 cur_state->setReady();
                 --gThreadList.mActiveThreadCount;
-            } else if( gThreadList.mActiveThreadCount < gProcs)
+                try_assign_run(&init_s, cur_state, bm);
+                continue;
+            }
+
+            if( gThreadList.mActiveThreadCount < gProcs)
             {
                 //Load balancing procedures
                     State* new_state;
                     if (gThreadList.mActiveThreadCount == gThreadList.Size()) {
-                        new_state = cur_state->try_split(b_coeff);
+                        new_state = cur_state->try_split();
                         if( new_state == nullptr )
                             continue;
 
@@ -308,26 +339,23 @@ void solve(State& init_s, const BM& bm, double eps, double b_coeff) {
                         if( new_state == nullptr )
                             continue;
 
-                        new_state = cur_state->try_split(b_coeff, new_state);
+                        new_state = cur_state->try_split(new_state);
                         if( new_state == nullptr )
                             continue;
                     }
 
-                    runThread(new_state, bm, eps);
+                    runThread(new_state, bm);
             }
         } //for-loop
     }
 
     gThreadList.clear();
 
-    /*if (! init_s.mPool.empty() && init_s.hasResources()) {
-        std::thread thread(solveSerial, &init_s, std::ref(bm), eps);
-        thread.join();
-    }*/
+    init_s.PrintResourses();
     std::cout << "Problem is solved" << std::endl;
 }
 
-double findMin(const BM& bm, double eps, int maxstep, double b_coeff) {
+double findMin(const BM& bm) {
     const int dim = bm.getDim();
     Box ibox;
     for (int i = 0; i < dim; i++) {
@@ -336,20 +364,20 @@ double findMin(const BM& bm, double eps, int maxstep, double b_coeff) {
     State s;
     s.mPool.push_back(ibox);
     s.mRecordVal = std::numeric_limits<double>::max();
-    s.mMaxSteps = maxstep;
+    s.mMaxSteps = gMaxStepsTotal;
     std::chrono::time_point<std::chrono::system_clock> start, end;
     start = std::chrono::system_clock::now();
 #if 0
-    solveSerial(s, bm, eps);
+    solveSerial(&s, bm);
 #else
-    solve(s, bm, eps, b_coeff);
+    solve(s, bm);
 #endif
     end = std::chrono::system_clock::now();
     int mseconds = (std::chrono::duration_cast<std::chrono::microseconds> (end-start)).count();
     std::cout << "Time: " << mseconds << " microsecond\n";
     std::cout << "Time per subproblem: " << ((mseconds > 0) ? ((double) s.mSteps / (double) mseconds) : 0) << " miscroseconds." << std::endl;
-    if (s.mSteps >= maxstep) {
-        std::cout << "Failed to converge in " << maxstep << " steps\n";
+    if (s.mSteps >= gMaxStepsTotal) {
+        std::cout << "Failed to converge in " << gMaxStepsTotal << " steps\n";
     } else {
         std::cout << "Converged in " << s.mSteps << " steps\n";
     }
@@ -362,30 +390,61 @@ double findMin(const BM& bm, double eps, int maxstep, double b_coeff) {
 }
 
 bool testBench(const BM& bm) {
-    constexpr double eps = 0.1;
-    constexpr double b_coeff = 0.5;
     std::cout << "*************Testing benchmark**********" << std::endl;
+    std::cout << "Available thread count: " << std::thread::hardware_concurrency() << std::endl;
+    std::cout << "Max thread count: " << gProcs << std::endl;
+    std::cout << "Max steps count: " << gMaxStepsTotal << std::endl;
+    std::cout << "Eps: " << gEps << std::endl;
+    std::cout << "Subs split coeffitient count: " << gSubsSplitCoeff << std::endl;
+    std::cout << "Steps split coeffitient count: " << gStepsSplitCoeff << std::endl;
+    std::cout << "Steps limit: " << gMtStepsLimit << std::endl;
+    std::cout << "Subs limit: " << gMtSubsLimit << std::endl << std::endl;
     std::cout << bm;
-    double v = findMin(bm, eps, gMaxStepsTotal, b_coeff);
+
+    bool res_flag = true;
+    double v = findMin(bm);
     double diff = v - bm.getGlobMinY();
-    if (diff > eps) {
+    if (diff > gEps) {
+        res_flag = false;
         std::cout << "BnB failed for " << bm.getDesc() << " benchmark " << std::endl;
     }
     std::cout << "the difference is " << v - bm.getGlobMinY() << std::endl;
     std::cout << "****************************************" << std::endl << std::endl;
+
+    return res_flag;
 }
 
 main(int argc, char** argv) {
     Benchmarks<double> tests;
-    int i = 0;
-    if(argc == 2) {
-        i = std::atoi(argv[1]) - 1;
+
+    switch (argc) {
+        int temp;
+        case 8: { temp =  std::atoi(argv[4]); gEps = temp ? temp : gEps; }
+        case 7: { temp =  std::atoi(argv[4]); gStepsSplitCoeff = temp ? temp : gStepsSplitCoeff; }
+        case 6: { temp =  std::atoi(argv[4]); gSubsSplitCoeff = temp ? temp : gSubsSplitCoeff; }
+        case 5: { temp =  std::atoi(argv[4]); gMtSubsLimit = temp ? temp : gMtSubsLimit; }
+        case 4: { temp = std::atoi(argv[3]); gMtStepsLimit = temp ? temp : gMtStepsLimit; }
+        case 3: { temp = std::atoi(argv[2]); gProcs = temp ? temp : gProcs; }
+        case 2: {int i = std::atoi(argv[1]) - 1; testBench(**(tests.begin() + i)); break;}
+
+        default: {
+            int bm_count = 0;
+            int failed_tests = 0;
+            std::vector<std::shared_ptr<Benchmark<double>>> failed_bm_vec;
+            for (auto bm : tests) {
+                std::cout <<"Test " << bm_count++ << std::endl;
+                int res = testBench(*bm);
+                if (! res) {
+                    failed_bm_vec.push_back(bm);
+                    ++failed_tests;
+                }
+            }
+
+            std::cout << "Failed tests count: " << failed_tests << std::endl;
+            std::cout << "Failed tests:" << std::endl;
+            for (auto bm : failed_bm_vec) {
+                std::cout << *bm << std::endl;
+            }
+        }
     }
-
-    testBench(*tests[i]);
-
-    /*
-    for (auto bm : tests) {
-        testBench(*bm);
-    }*/
 }
