@@ -21,6 +21,7 @@
 #include <forward_list>
 #include <mutex>
 #include <memory>
+#include <atomic>
 
 #include <testfuncs/benchmarks.hpp>
 
@@ -40,7 +41,7 @@ static int gMtSubsLimit = 10;
 
 static int gMtStepsLimit = 1000;
 
-const static int gMaxStepsTotal = 10000000;
+const static int gMaxStepsTotal = 1000000;
 
 struct ThreadList {
 
@@ -76,7 +77,7 @@ struct State {
         mPool(st.mPool),
         mMaxSteps(st.mMaxSteps),
         mSteps(st.mSteps),
-        mStatus(st.mStatus),
+        mStatus(st.mStatus.load()),
         mutex() {}
 
     State& operator=(const State& st) {
@@ -85,7 +86,7 @@ struct State {
         mPool.assign(st.mPool.begin(), st.mPool.end());
         mMaxSteps = st.mMaxSteps;
         mSteps = st.mSteps;
-        mStatus = st.mStatus;
+        mStatus.store(st.mStatus.load());
 
         return *this;
     }
@@ -186,7 +187,7 @@ struct State {
 
     int mSteps = 0;
 
-    Status mStatus;
+    std::atomic<Status> mStatus;
 
     std::mutex mutex;
 };
@@ -365,14 +366,14 @@ double findMin(const BM& bm) {
     s.mPool.push_back(ibox);
     s.mRecordVal = std::numeric_limits<double>::max();
     s.mMaxSteps = gMaxStepsTotal;
-    std::chrono::time_point<std::chrono::system_clock> start, end;
-    start = std::chrono::system_clock::now();
+    std::chrono::time_point<std::chrono::steady_clock> start, end;
+    start = std::chrono::steady_clock::now();
 #if 0
     solveSerial(&s, bm);
 #else
     solve(s, bm);
 #endif
-    end = std::chrono::system_clock::now();
+    end = std::chrono::steady_clock::now();
     int mseconds = (std::chrono::duration_cast<std::chrono::microseconds> (end-start)).count();
     std::cout << "Time: " << mseconds << " microsecond\n";
     std::cout << "Time per subproblem: " << ((mseconds > 0) ? ((double) s.mSteps / (double) mseconds) : 0) << " miscroseconds." << std::endl;
