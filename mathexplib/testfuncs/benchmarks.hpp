@@ -405,7 +405,7 @@ public:
 		return ::calcIntervalGrad(BiggsExpr6<IntervalDer<T>>(), box);
 	}
 
-	BiggsEXP6Benchmark() : Benchmark<T>("Biggs EXP5 Function",0)	{
+    BiggsEXP6Benchmark() : Benchmark<T>("Biggs EXP6 Function",0)	{
 		this->mGlobMinX.push_back(1);
 		this->mGlobMinX.push_back(10);
 		this->mGlobMinX.push_back(1);
@@ -719,7 +719,7 @@ public:
 		return ::calcIntervalGrad(Brown<IntervalDer<T>>(this->getDim()), box);
 	}
 
-	BrownBenchmark(int size) : Benchmark<T>("Ackley 1 function",0)	{
+    BrownBenchmark(int size) : Benchmark<T>("Brown function",0)	{
 		for(int i=0; i < size; ++i) {
 			this->mGlobMinX.push_back(0);
 			this->mBounds.push_back({-1,4});
@@ -2130,7 +2130,7 @@ public:
 		return ::calcIntervalGrad(Mishra9<IntervalDer<T>>(), box);
 	}
 
-	Mishra9Benchmark() : Benchmark<T>("Mishra 8 function",0)	{
+    Mishra9Benchmark() : Benchmark<T>("Mishra 9 function",0)	{
 		this->mGlobMinX.push_back(1);
 		this->mGlobMinX.push_back(2);
 		this->mGlobMinX.push_back(3);
@@ -2267,7 +2267,7 @@ public:
 		return ::calcIntervalGrad(PowellSingular2<IntervalDer<T>>(this->getDim()), box);
 	}
 
-	PowellSingular2Benchmark(int size) : Benchmark<T>("Powell Singular 2 function",0,false)	{
+    PowellSingular2Benchmark(int size) : Benchmark<T>("Powell Singular 2_" + std::to_string(size) + "s function",0,false)	{
 		for(int i=0; i < size; ++i) {
 			this->mGlobMinX.push_back(0);
 			this->mBounds.push_back({-4,5});
@@ -2402,7 +2402,7 @@ public:
 		return ::calcIntervalGrad(Price4<IntervalDer<T>>(), box);
 	}
 
-	Price4Benchmark() : Benchmark<T>("Price 1 function",0)	{
+    Price4Benchmark() : Benchmark<T>("Price 4 function",0)	{
 		this->mGlobMinX.push_back(0);
 		this->mGlobMinX.push_back(0);
 		this->mBounds.push_back({-500,500});
@@ -4379,7 +4379,7 @@ public:
 		add(std::make_shared<SchwefelBenchmark<double>>(3));
 		add(std::make_shared<Schwefel1_2Benchmark<double>>(3));
 		add(std::make_shared<Schwefel2_20Benchmark<double>>(3));
-		add(std::make_shared<Schwefel2_20Benchmark<double>>(3));
+        add(std::make_shared<Schwefel2_22Benchmark<double>>(3));
 		add(std::make_shared<Schwefel2_23Benchmark<double>>(3));
 		add(std::make_shared<Schwefel2_26Benchmark<double>>());
 		add(std::make_shared<Schwefel2_36Benchmark<double>>());
@@ -4419,7 +4419,7 @@ public:
 		add(std::make_shared<WhitleyBenchmark<double>>(3));
 		add(std::make_shared<WolfeBenchmark<double>>());
 		add(std::make_shared<XinSheYang2Benchmark<double>>(3));
-		add(std::make_shared< XinSheYang3Benchmark<double>>(3));
+        add(std::make_shared<XinSheYang3Benchmark<double>>(3));
 		add(std::make_shared<XinSheYang4Benchmark<double>>(3));
 		add(std::make_shared<ZakharovBenchmark<double>>(3));
 		add(std::make_shared<ZettlBenchmark<double>>());

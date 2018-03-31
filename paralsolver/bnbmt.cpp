@@ -22,6 +22,7 @@
 #include <mutex>
 #include <memory>
 #include <atomic>
+#include <unordered_set>
 
 #include <testfuncs/benchmarks.hpp>
 
@@ -29,7 +30,7 @@ using BM = Benchmark<double>;
 using Box = std::vector<Interval<double>>;
 struct State;
 
-static int gProcs = 3;
+static int gProcs = 4;
 
 static double gEps = 0.1;
 
@@ -346,6 +347,8 @@ void solve(State& init_s, const BM& bm) {
                     }
 
                     runThread(new_state, bm);
+            } else {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
             }
         } //for-loop
     }
@@ -376,7 +379,7 @@ double findMin(const BM& bm) {
     end = std::chrono::steady_clock::now();
     int mseconds = (std::chrono::duration_cast<std::chrono::microseconds> (end-start)).count();
     std::cout << "Time: " << mseconds << " microsecond\n";
-    std::cout << "Time per subproblem: " << ((mseconds > 0) ? ((double) s.mSteps / (double) mseconds) : 0) << " miscroseconds." << std::endl;
+    std::cout << "Time per subproblem: " << ((mseconds > 0) ? ((double) mseconds / (double) s.mSteps) : 0) << " miscroseconds." << std::endl;
     if (s.mSteps >= gMaxStepsTotal) {
         std::cout << "Failed to converge in " << gMaxStepsTotal << " steps\n";
     } else {
@@ -418,11 +421,16 @@ bool testBench(const BM& bm) {
 main(int argc, char** argv) {
     Benchmarks<double> tests;
 
+    std::unordered_set<std::string> task_set{"Biggs EXP5 Function", "Helical Valley function",
+                                            "Hosaki function", "Langerman-5 function",
+                                            "Quintic function", "Deckkers-Aarts function",
+                                            "Dolan function", "Goldstein Price function",
+                                            "Mishra 9 function", "Trid 10 function"};
     switch (argc) {
         int temp;
-        case 8: { temp =  std::atoi(argv[4]); gEps = temp ? temp : gEps; }
-        case 7: { temp =  std::atoi(argv[4]); gStepsSplitCoeff = temp ? temp : gStepsSplitCoeff; }
-        case 6: { temp =  std::atoi(argv[4]); gSubsSplitCoeff = temp ? temp : gSubsSplitCoeff; }
+        case 8: { temp =  std::atoi(argv[7]); gEps = temp ? temp : gEps; }
+        case 7: { temp =  std::atoi(argv[6]); gStepsSplitCoeff = temp ? temp : gStepsSplitCoeff; }
+        case 6: { temp =  std::atoi(argv[5]); gSubsSplitCoeff = temp ? temp : gSubsSplitCoeff; }
         case 5: { temp =  std::atoi(argv[4]); gMtSubsLimit = temp ? temp : gMtSubsLimit; }
         case 4: { temp = std::atoi(argv[3]); gMtStepsLimit = temp ? temp : gMtStepsLimit; }
         case 3: { temp = std::atoi(argv[2]); gProcs = temp ? temp : gProcs; }
@@ -433,6 +441,11 @@ main(int argc, char** argv) {
             int failed_tests = 0;
             std::vector<std::shared_ptr<Benchmark<double>>> failed_bm_vec;
             for (auto bm : tests) {
+                auto test_f = task_set.find(bm->getDesc());
+                if(test_f == task_set.end()) {
+                    continue;
+                }
+
                 std::cout <<"Test " << bm_count++ << std::endl;
                 int res = testBench(*bm);
                 if (! res) {
