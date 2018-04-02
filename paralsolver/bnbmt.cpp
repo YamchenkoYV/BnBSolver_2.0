@@ -46,7 +46,8 @@ const static int gMaxStepsTotal = 1000000;
 
 struct ThreadList {
 
-    State* getReadyState();
+   State* getReadyState();
+   void addReadyState(State*);
 
    std::forward_list<State*>& operator()() { return mList; }
    size_t Size() const { return mThreadListSize; }
@@ -61,6 +62,7 @@ struct ThreadList {
    void clear();
 
    std::forward_list< State* > mList;
+   std::vector<State*> ready_states;
 
    size_t mThreadListSize = 0;
 
@@ -177,6 +179,7 @@ struct State {
     bool isReady() const { return (this->mStatus == IS_READY) ? true : false; }
 
     //~State() { std::cout << "State destructor" << std::endl; }
+    int getRemSteps() { return mMaxSteps - mSteps; }
 
     double mRecordVal;
 
@@ -194,14 +197,16 @@ struct State {
 };
 
 State* ThreadList::getReadyState() {
-    for (State* st : mList) {
-        if (st->isReady()) {
-            return st;
-        }
+    if(this->ready_states.empty()) {
+        return nullptr;
     }
 
-    return nullptr;
+    State* rstate = *(this->ready_states.end()-1);
+    this->ready_states.pop_back();
+    return rstate;
 }
+
+void ThreadList::addReadyState(State* sptr) { this->ready_states.push_back(sptr); }
 
 void ThreadList::clear() {
     for(auto it = mList.begin(); it != mList.end();) {
@@ -210,6 +215,7 @@ void ThreadList::clear() {
         mList.pop_front();
     }
 
+    this->ready_states.clear();
     mThreadListSize = 0;
     mActiveThreadCount = 0;
 }
@@ -288,10 +294,13 @@ void runThread(State* s, const BM& bm) {
     init_thread.detach();
 }
 
-void try_assign_run(State* sender, State* receiver, const BM& bm) {
-    if (! sender->mPool.empty() && sender->hasResources()) {
+bool try_assign_run(State* sender, State* receiver, const BM& bm) {
+    if (sender->hasResources() && sender->mMaxSteps > gMtStepsLimit) {
         sender->assignTaskTo(receiver);
         runThread(receiver, bm);
+        return true;
+    } else {
+        return false;
     }
 }
 
@@ -308,49 +317,62 @@ void solve(State& init_s, const BM& bm) {
 
     runThread(first_s, bm);
     
-    while(gThreadList.ActiveCount() || init_s.hasResources()) {
+    while(gThreadList.ActiveCount() || (init_s.hasResources() && init_s.mMaxSteps > gMtStepsLimit)) {
         for( auto iter = gThreadList().begin() ; iter != gThreadList().end(); ++iter)
         {
             State* cur_state = *iter;
             if (cur_state->isReady()) {
-                try_assign_run(&init_s, cur_state, bm);
                 continue;
             }
             
-            if( cur_state->isFinished() )
+            if(cur_state->isFinished())
             {
                 init_s.merge(*cur_state);
                 cur_state->setReady();
                 --gThreadList.mActiveThreadCount;
-                try_assign_run(&init_s, cur_state, bm);
+                bool flag = try_assign_run(&init_s, cur_state, bm);
+                if(! flag) {
+                    //std::cout << "Add ready" << std::endl;
+                    gThreadList.addReadyState(cur_state);
+                }
                 continue;
             }
 
-            if( gThreadList.mActiveThreadCount < gProcs)
+            if(gThreadList.mActiveThreadCount < gProcs)
             {
                 //Load balancing procedures
                     State* new_state;
                     if (gThreadList.mActiveThreadCount == gThreadList.Size()) {
+                        //std::cout << "Load balancing" << std::endl;
                         new_state = cur_state->try_split();
                         if( new_state == nullptr )
                             continue;
 
                         gThreadList.PushFront(new_state);
                     } else {
-                        new_state = gThreadList.getReadyState();
-                        if( new_state == nullptr )
+                        State* ready_state = gThreadList.getReadyState();
+                        if( ready_state == nullptr ) {
+                            std::cout << "Can't find ready. Ready size : " << gThreadList.ready_states.size() << std::endl;
                             continue;
+                        }
 
-                        new_state = cur_state->try_split(new_state);
-                        if( new_state == nullptr )
+                        new_state = cur_state->try_split(ready_state);
+                        if(new_state == nullptr) {
+                            gThreadList.addReadyState(ready_state);
                             continue;
+                        }
                     }
 
                     runThread(new_state, bm);
             } else {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                std::this_thread::yield();
             }
         } //for-loop
+    }
+
+    //Processing remaining subs
+    if(init_s.hasResources()) {
+        solveSerial(&init_s, bm);
     }
 
     gThreadList.clear();
