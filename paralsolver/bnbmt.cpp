@@ -2,7 +2,7 @@
  * A simple multithreaded interval-based bnb solver
  */
 
-/* 
+/*
  * File:   tutorialbnb.cpp
  * Author: yamchenko.y.v
  *
@@ -316,7 +316,7 @@ void solve(State& init_s, const BM& bm) {
     gThreadList.PushFront(first_s);
 
     runThread(first_s, bm);
-    
+
     while(gThreadList.ActiveCount() || (init_s.hasResources() && init_s.mMaxSteps > gMtStepsLimit)) {
         for( auto iter = gThreadList().begin() ; iter != gThreadList().end(); ++iter)
         {
@@ -324,7 +324,7 @@ void solve(State& init_s, const BM& bm) {
             if (cur_state->isReady()) {
                 continue;
             }
-            
+
             if(cur_state->isFinished())
             {
                 init_s.merge(*cur_state);
@@ -407,7 +407,7 @@ double findMin(const BM& bm) {
     } else {
         std::cout << "Converged in " << s.mSteps << " steps\n";
     }
-    
+
     std::cout << "BnB found = " << s.mRecordVal << std::endl;
     std::cout << " at x [ ";
     std::copy(s.mRecord.begin(), s.mRecord.end(), std::ostream_iterator<double>(std::cout, " "));
@@ -443,17 +443,14 @@ bool testBench(const BM& bm) {
 main(int argc, char** argv) {
     Benchmarks<double> tests;
 
-    std::unordered_set<std::string> task_set{"Biggs EXP5 Function", "Helical Valley function",
-                                            "Hosaki function", "Langerman-5 function",
-                                            "Quintic function", "Deckkers-Aarts function",
-                                            "Dolan function", "Goldstein Price function",
-                                            "Mishra 9 function", "Trid 10 function"};
+    std::unordered_map<std::string, int> task_map({{"Biggs EXP5 Function", 9}, {"Helical Valley function", 9},
+                                            {"Hosaki function", 9}, {"Langerman-5 function", 9},
+                                            {"Quintic function", 19}, {"Deckkers-Aarts function", 15},
+                                            {"Dolan function", 25}, {"Goldstein Price function", 13},
+                                            {"Mishra 9 function", 18}, {"Trid 10 function", 17}});
+
     switch (argc) {
         int temp;
-        case 8: { temp =  std::atoi(argv[7]); gEps = temp ? temp : gEps; }
-        case 7: { temp =  std::atoi(argv[6]); gStepsSplitCoeff = temp ? temp : gStepsSplitCoeff; }
-        case 6: { temp =  std::atoi(argv[5]); gSubsSplitCoeff = temp ? temp : gSubsSplitCoeff; }
-        case 5: { temp =  std::atoi(argv[4]); gMtSubsLimit = temp ? temp : gMtSubsLimit; }
         case 4: { temp = std::atoi(argv[3]); gMtStepsLimit = temp ? temp : gMtStepsLimit; }
         case 3: { temp = std::atoi(argv[2]); gProcs = temp ? temp : gProcs; }
         case 2: {int i = std::atoi(argv[1]) - 1; testBench(**(tests.begin() + i)); break;}
@@ -463,10 +460,13 @@ main(int argc, char** argv) {
             int failed_tests = 0;
             std::vector<std::shared_ptr<Benchmark<double>>> failed_bm_vec;
             for (auto bm : tests) {
-                auto test_f = task_set.find(bm->getDesc());
-                if(test_f == task_set.end()) {
+                std::string func_name = bm->getDesc();
+                auto test_f = task_map.find(func_name);
+                if(test_f == task_map.end()) {
                     continue;
                 }
+
+                gProcs = task_map[func_name];
 
                 std::cout <<"Test " << bm_count++ << std::endl;
                 int res = testBench(*bm);
