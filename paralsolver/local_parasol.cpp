@@ -22,8 +22,10 @@
 #include <mutex>
 #include <memory>
 #include <atomic>
+#include <numeric>
 #include <unordered_set>
 #include <condition_variable>
+
 #include "logger.hpp"
 
 #include <common/parbench.hpp>
@@ -35,7 +37,7 @@ constexpr char gKnownRecord[] = "knrec";
 
 static double gEps = 0.1;
 
-static std::string gKnrec = "knrec";
+static bool gKnrec = false;
 
 static double gSubsSplitCoeff = 0.5;
 
@@ -56,23 +58,23 @@ Logger logger("paral_solver.log");
 /**
  * BnB state
  */
-struct TreadHolder {
+struct ThreadHolder {
 
     enum Status {
         IS_READY, IS_PROCESSING, IS_FINISHED
     };
 
-    TreadHolder(Status stat = IS_READY) : mStatus(stat) {
+    ThreadHolder(ThreadPool* tPool, Status stat = IS_READY) : mThreadPool(tPool), mStatus(stat) {
     }
 
-    TreadHolder(const TreadHolder& st) : mRecordVal(st.mRecordVal),
+    ThreadHolder(const ThreadHolder& st) : mRecordVal(st.mRecordVal),
     mRecord(st.mRecord),
     mPool(st.mPool),
     mRemainingSteps(st.mRemainingSteps),
     mStatus(st.mStatus.load()),
     mMutex() {}
 
-    TreadHolder& operator=(const TreadHolder& st) {
+    ThreadHolder& operator=(const ThreadHolder& st) {
         mRecordVal = st.mRecordVal;
         mRecord = st.mRecord;
         mPool.assign(st.mPool.begin(), st.mPool.end());
@@ -81,7 +83,7 @@ struct TreadHolder {
         return *this;
     }
 
-    void merge(const std::shared_ptr<TreadHolder> s) {
+    void merge(const std::shared_ptr<ThreadHolder> s) {
         mRemainingSteps += s->mRemainingSteps;
         s->mRemainingSteps = 0;
         if (s->mRecordVal < mRecordVal) {
@@ -100,20 +102,20 @@ struct TreadHolder {
                 "Remainng steps count: " << mRemainingSteps << "\n";
     }
 
-    void assignTaskTo(std::shared_ptr<TreadHolder> st) {
+    void assignTaskTo(std::shared_ptr<ThreadHolder> st) {
         *st = *this;
         mRemainingSteps = 0;
         mPool.clear();
     }
 
-    std::shared_ptr<TreadHolder> trySplit(std::shared_ptr<TreadHolder> s = nullptr) {
+    std::shared_ptr<ThreadHolder> trySplit(std::shared_ptr<ThreadHolder> s = nullptr) {
         std::lock_guard<std::mutex> lock(mMutex);
         const int pool_size = mPool.size();
         if (pool_size <= gMtSubsLimit || mRemainingSteps <= gMtStepsLimit) {
             return nullptr;
         }
         if (s == nullptr) {
-            s = std::make_shared<TreadHolder>();
+            s = std::make_shared<ThreadHolder>();
         }
         const int mv_step_count = mRemainingSteps * gStepsSplitCoeff;
         mRemainingSteps -= mv_step_count;
@@ -167,12 +169,17 @@ struct TreadHolder {
         return (this->mStatus == IS_READY) ? true : false;
     }
 
-    double mRecordVal;
+    void run(ThreadPool* const tp) {
+
+    }
+
+    double mRecordVal = 0.0;
     std::vector<double> mRecord;
     std::vector<Box> mPool;
-    int mRemainingSteps;
+    int mRemainingSteps = 0;
     std::atomic<Status> mStatus;
     std::mutex mMutex;
+    ThreadPool* mThreadPool;
 };
 
 class Notifier {
@@ -193,7 +200,7 @@ public:
         }
     }
 
-    void wait_notification(std::shared_ptr<TreadHolder> s) {
+    void wait_notification(std::shared_ptr<ThreadHolder> s) {
         std::unique_lock<std::mutex> lock(s->mMutex);
         mCV.wait_for(lock, mWaitPeriod, [&]() {
             return mNotificationCount.load() != 0;
@@ -210,54 +217,82 @@ Notifier gNotifier;
 
 class ThreadPool final {
 public:
-    std::shared_ptr<TreadHolder> getReadyState() {
-        if (this->mReadyStates.empty()) {
-            return nullptr;
+//    ThreadPool(const size_t pool_size, const BM& bm, bool knrec = false) :
+//        mReadyStatesIndexes(pool_size), mList(pool_size), mBenchmark(bm) {
+//        std::iota(mReadyStatesIndexes.begin(), mReadyStatesIndexes.end(), 0);
+
+//        init(knrec);
+//    }
+
+    ThreadPool(const size_t pool_size, const BM& bm, bool knrec = false) :
+            mReadyStatesIndexes(pool_size), mList(pool_size), mBenchmark(bm) {
+            std::iota(mReadyStatesIndexes.begin(), mReadyStatesIndexes.end(), 0);
+
+            init(knrec);
         }
 
-        std::shared_ptr<TreadHolder> rstate = *(this->mReadyStates.end() - 1);
-        this->mReadyStates.pop_back();
-        return rstate;
+    size_t popReadyThreadHolderIdx() {
+        if (this->mReadyStatesIndexes.empty()) {
+            return -1;
+        }
+        return mReadyStatesIndexes.pop_back();
     }
 
-    void addReadyState(std::shared_ptr<TreadHolder> sptr) {
-        this->mReadyStates.push_back(sptr);
+    void addReadyThreadHolderIdx(const size_t idx) {
+        mReadyStatesIndexes.push_back(idx);
     }
 
-    std::forward_list<std::shared_ptr<TreadHolder>>& operator()() {
-        return mList;
-    }
-
-    size_t Size() const {
-        return mThreadListSize;
-    }
-
-    size_t ActiveCount() const {
+    size_t activeCount() const {
         return mActiveThreadCount;
     }
 
-    void PushFront(std::shared_ptr<TreadHolder> st) {
-        ++mThreadListSize;
-        mList.push_front(st);
+    ///TODO: подумать
+    void loadThread() {
+        ++mActiveThreadCount;
     }
 
-    void clear() {
-        mList.clear();
-        this->mReadyStates.clear();
-        mThreadListSize = 0;
-        mActiveThreadCount = 0;
+    void releaseThread(size_t idx) {
+        this->mReadyStatesIndexes.push_back(idx);
+        --mActiveThreadCount;
+    }
+
+    void run() {
+        size_t idx = popReadyThreadHolderIdx();
+        this->mList[idx].run(this);
+        this->loadThread();
     }
 
 private:
-    std::forward_list<std::shared_ptr<TreadHolder>> mList;
-    std::vector<std::shared_ptr<TreadHolder>> mReadyStates;
-    size_t mThreadListSize = 0;
+    void init(bool knrec) {
+        const int dim = this->mBenchmark.getDim();
+        Box ibox;
+
+        /// TODO: Вынести в Box
+        for (size_t i = 0; i < dim; i++) {
+            ibox.emplace_back(bm.getBounds()[i].first, bm.getBounds()[i].second);
+        }
+
+        ThreadHolder& s = mList[0];
+        s->mPool.push_back(ibox);
+        s->mRecordVal = std::numeric_limits<double>::max();
+        s->mRemainingSteps = gMaxStepsTotal;
+
+        if (knrec) {
+            s->mRecordVal = bm.getGlobMinY();
+        } else {
+            s->mRecordVal = std::numeric_limits<double>::max();
+        }
+    }
+
+    std::vector<ThreadHolder> mList;
+    std::vector<size_t> mReadyStatesIndexes;
     size_t mActiveThreadCount = 0;
+    BM& mBenchmark;
 };
 
-ThreadPool gThreadPool;
+ThreadPool* gThreadPool;
 
-std::ostream& operator<<(std::ostream & out, const std::shared_ptr<TreadHolder> s) {
+std::ostream& operator<<(std::ostream & out, const std::shared_ptr<ThreadHolder> s) {
     out << "\"recval\" : " << s->mRecordVal << "\n";
     out << "\"record\" : [";
     for (int i = 0; i < s->mRecord.size(); i++) {
@@ -274,7 +309,7 @@ double len(const Interval<double>& I) {
     return I.rb() - I.lb();
 }
 
-void split(const Box& ibox, std::shared_ptr<TreadHolder> s) {
+void split(const Box& ibox, std::shared_ptr<ThreadHolder> s) {
     auto result = std::max_element(ibox.begin(), ibox.end(),
             [](const Interval<double>& f, const Interval<double>& s) {
                 return len(f) < len(s);
@@ -301,7 +336,7 @@ void getCenter(const Box& ibox, std::vector<double>& c) {
     }
 }
 
-void solveSerial(std::shared_ptr<TreadHolder> s, const BM& bm) {
+void solveSerial(std::shared_ptr<ThreadHolder> s, const BM& bm) {
     const int dim = bm.getDim();
     std::vector<double> c(dim);
 
@@ -325,14 +360,14 @@ void solveSerial(std::shared_ptr<TreadHolder> s, const BM& bm) {
     gNotifier.notify();
 }
 
-void runThread(std::shared_ptr<TreadHolder> s, const BM& bm) {
+void runThread(std::shared_ptr<ThreadHolder> s, const BM& bm) {
     gThreadPool.mActiveThreadCount++;
     s->setProcessing();
     std::thread init_thread(solveSerial, s, std::ref(bm));
     init_thread.detach();
 }
 
-bool try_assign_run(std::shared_ptr<TreadHolder> sender, std::shared_ptr<TreadHolder> receiver, const BM& bm) {
+bool try_assign_run(std::shared_ptr<ThreadHolder> sender, std::shared_ptr<ThreadHolder> receiver, const BM& bm) {
     if (sender->hasResources() && sender->mRemainingSteps > gMtStepsLimit) {
         sender->assignTaskTo(receiver);
         runThread(receiver, bm);
@@ -342,9 +377,8 @@ bool try_assign_run(std::shared_ptr<TreadHolder> sender, std::shared_ptr<TreadHo
     }
 }
 
-void solve(std::shared_ptr<TreadHolder> init_s, const BM& bm) {
-    gRecord.store(std::numeric_limits<double>::max());
-    std::shared_ptr<TreadHolder> first_s = std::make_shared<TreadHolder>();
+void solve(std::shared_ptr<ThreadHolder> init_s, const BM& bm) {
+    std::shared_ptr<ThreadHolder> first_s = std::make_shared<ThreadHolder>();
     init_s->assignTaskTo(first_s);
     gThreadPool.PushFront(first_s);
 
@@ -363,22 +397,13 @@ void solve(std::shared_ptr<TreadHolder> init_s, const BM& bm) {
     std::cout << "Problem is solved" << std::endl;
 }
 
-double findMin(const BM& bm) {
-    const int dim = bm.getDim();
-    Box ibox;
-    for (int i = 0; i < dim; i++) {
-        ibox.emplace_back(bm.getBounds()[i].first, bm.getBounds()[i].second);
-    }
-    std::shared_ptr<TreadHolder> s = std::make_shared<TreadHolder>();
-    s->mPool.push_back(ibox);
-    s->mRecordVal = std::numeric_limits<double>::max();
-    s->mRemainingSteps = gMaxStepsTotal;
+void initTask(const BM& bm) {
+    gRecord.store(std::numeric_limits<double>::max());
+    gThreadPool = new ThreadPool(gProcs, bm, gKnrec);
+}
 
-    if (gKnrec == gKnownRecord) {
-        s->mRecordVal = bm.getGlobMinY();
-    } else {
-        s->mRecordVal = std::numeric_limits<double>::max();
-    }
+double findMin(const BM& bm) {
+    initTask(bm);
 
     std::chrono::time_point<std::chrono::steady_clock> start, end;
     start = std::chrono::steady_clock::now();
@@ -403,6 +428,8 @@ double findMin(const BM& bm) {
     std::copy(s->mRecord.begin(), s->mRecord.end(), std::ostream_iterator<double>(std::cout, " "));
     std::cout << "]\n";
     return gRecord.load();
+
+    delete gThreadPool;
 }
 
 void printInfo() {
@@ -462,7 +489,13 @@ main(int argc, char** argv) {
         return 0;
     } else if (argc == 10) {
         bench = argv[1];
-        gKnrec = argv[2];
+        std::string knrec_param = argv[2];
+        if (knrec_param == gKnownRecord) {
+            gKnrec = true;
+        } else {
+            gKnrec = false;
+        }
+
         gEps = atof(argv[3]);
         gMaxStepsTotal = atoi(argv[4]);
         gProcs = atoi(argv[5]);
