@@ -64,7 +64,7 @@ struct ThreadHolder {
         IS_READY, IS_PROCESSING, IS_FINISHED
     };
 
-    ThreadHolder(ThreadPool* tPool, Status stat = IS_READY) : mThreadPool(tPool), mStatus(stat) {
+    ThreadHolder(std::shared_ptr<ThreadPool> tPool, Status stat = IS_READY) : mThreadPool(tPool), mStatus(stat) {
     }
 
     ThreadHolder(const ThreadHolder& st) : mRecordVal(st.mRecordVal),
@@ -169,17 +169,19 @@ struct ThreadHolder {
         return (this->mStatus == IS_READY) ? true : false;
     }
 
-    void run(ThreadPool* const tp) {
-
+    void run(std::shared_ptr<ThreadPool> const tp) {
+        mStatus = Status::IS_PROCESSING;
+        std::thread new_thread(solveSerial, s, std::ref(bm));
+        new_thread.join();
     }
 
     double mRecordVal = 0.0;
     std::vector<double> mRecord;
     std::vector<Box> mPool;
     int mRemainingSteps = 0;
-    std::atomic<Status> mStatus;
+    Status mStatus;
     std::mutex mMutex;
-    ThreadPool* mThreadPool;
+    std::shared_ptr<ThreadPool> mThreadPool;
 };
 
 class Notifier {
@@ -290,7 +292,7 @@ private:
     BM& mBenchmark;
 };
 
-ThreadPool* gThreadPool;
+std::shared_ptr<ThreadPool> gThreadPool;
 
 std::ostream& operator<<(std::ostream & out, const std::shared_ptr<ThreadHolder> s) {
     out << "\"recval\" : " << s->mRecordVal << "\n";
@@ -340,6 +342,7 @@ void solveSerial(std::shared_ptr<ThreadHolder> s, const BM& bm) {
     const int dim = bm.getDim();
     std::vector<double> c(dim);
 
+
     while (s->hasResources()) {
         Box b = s->getSub();
         getCenter(b, c);
@@ -360,6 +363,7 @@ void solveSerial(std::shared_ptr<ThreadHolder> s, const BM& bm) {
     gNotifier.notify();
 }
 
+// Deprecated
 void runThread(std::shared_ptr<ThreadHolder> s, const BM& bm) {
     gThreadPool.mActiveThreadCount++;
     s->setProcessing();
@@ -399,7 +403,7 @@ void solve(std::shared_ptr<ThreadHolder> init_s, const BM& bm) {
 
 void initTask(const BM& bm) {
     gRecord.store(std::numeric_limits<double>::max());
-    gThreadPool = new ThreadPool(gProcs, bm, gKnrec);
+    gThreadPool = std::make_shared<ThreadPool>(gProcs, bm, gKnrec);
 }
 
 double findMin(const BM& bm) {
